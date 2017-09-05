@@ -8,14 +8,17 @@ import com.netflix.hystrix.HystrixCommandProperties;
 import com.netflix.hystrix.strategy.concurrency.HystrixRequestContext;
 import microservicecommons.interservicecommunication.exception.ApiCommunicationException;
 import microservicecommons.interservicecommunication.model.RetryOptions;
+import org.apache.commons.io.IOUtils;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -98,7 +101,49 @@ public abstract class UrlJsonQueryCommand<T> extends HystrixCommand<T> {
             } catch (IOException e) {
                 if(i>=retryOptions.getMaxAmountRetries()) {
                     LOGGER.warn("retry exhausted after "+i+1+" tries.");
-                    throw new ApiCommunicationException("could not open connection to url / create input stream. url: " + queryUrl.toString(), e);
+
+                    Integer responseCode = null;
+                    String errorResponse = "";
+                    try {
+                        // try to get response code
+                        if(connection != null) {
+                            responseCode = connection.getResponseCode();
+                        }
+                        // try to get message from server
+                        StringWriter errorStringWriter = new StringWriter();
+                        IOUtils.copy(connection.getErrorStream(), errorStringWriter, Charset.defaultCharset());
+                        errorResponse = errorStringWriter.toString();
+                    } catch (Exception e2){}
+
+                    if(responseCode != null) {
+                            // throw exception depending on error reason
+                            switch (responseCode) {
+                                case 501:
+                                    throw new ApiCommunicationException(
+                                            e.getMessage()+". Server returned: "+errorResponse,
+                                            e,
+                                            ApiCommunicationException.ProblemReason.SERVER_UNABLE
+                                    );
+                                case 400:
+                                    throw new ApiCommunicationException(
+                                            e.getMessage()+". Server returned: "+errorResponse,
+                                            e,
+                                            ApiCommunicationException.ProblemReason.CLIENT_MISTAKE
+                                    );
+                                case 500:
+                                    throw new ApiCommunicationException(
+                                            e.getMessage()+". Server returned: "+errorResponse,
+                                            e,
+                                            ApiCommunicationException.ProblemReason.SERVER_ERROR
+                                    );
+                        }
+                    }
+                    // throw default exception if reason could not be determined
+                    throw new ApiCommunicationException(
+                            e.getMessage()+". Server returned: "+errorResponse,
+                            e,
+                            ApiCommunicationException.ProblemReason.CONNECTION_IMPOSSIBLE
+                    );
                 } else {
                     //make another try
                     LOGGER.debug("command "+commandName+" failed due to exception: "+e.getMessage()+". Starting retry soon...");
